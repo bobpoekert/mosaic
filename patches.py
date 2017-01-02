@@ -49,6 +49,7 @@ def color_distance(patch, color):
 def rgb_stack(mat2d):
     return mat2d.reshape((mat2d.shape[0], mat2d.shape[1], 1)).repeat(3, 2)
 
+
 def hdr_blend(patch_a, patch_b):
     assert patch_a.shape == patch_b.shape, repr((patch_a.shape, patch_b.shape))
 
@@ -145,14 +146,13 @@ class PatchIndex(object):
         patch = random.choice(self.patches)
         res[0:patch.shape[0], 0:patch.shape[1], :] = patch
         x_offset = patch.shape[0]
-        y_offset = patch.shape[1]
+        y_offset = 0
 
         while 1:
             try:
-                if x_offset >= width - patch.shape[0]:
+                if x_offset > width - patch.shape[0]:
                     x_offset = 0
-                    y_offset += 16
-
+                    y_offset += patch.shape[1]
 
                 if y_offset >= height:
                     break
@@ -160,30 +160,27 @@ class PatchIndex(object):
 
                 if y_offset > 0:
                     prev_y = res[x_offset:(x_offset+patch.shape[0]), (y_offset-patch.shape[1]):y_offset, :]
-                    try:
-                        patch_y = self.match_y(prev_y).astype(np.float32)
-                        patch = hdr_blend(patch_x, patch_y)
-                    except IndexError:
-                        patch = patch_x
+                    patch_y = self.match_y(prev_y).astype(np.float32)
+                    patch = hdr_blend(patch_x, patch_y)
 
                 else:
                     patch = patch_x
 
                 patch = patch.astype(np.float32)
 
-                if x_offset > 0:
-                    target = res[x_offset:(x_offset + patch.shape[0]), y_offset:(y_offset + patch.shape[1]), :]
-                    x_delta = min(16, patch_offset(patch, target))
+                #if x_offset > 0:
+                #    target = res[x_offset:(x_offset + patch.shape[0]), y_offset:(y_offset + patch.shape[1]), :]
+                #    x_delta = min(16, patch_offset(patch, target))
 
-                    x_start = x_offset - x_delta
+                #     x_start = x_offset - x_delta
 
-                    patch_overlap = patch[:x_delta, :, :]
-                    target_overlap = res[x_start:(x_start + x_delta), y_offset:(y_offset + patch.shape[1]), :]
-                    if target_overlap.shape == patch_overlap.shape:
-                        overlap_pixels = hdr_blend(patch_overlap, target_overlap)
-                        patch[:x_delta, :, :] = overlap_pixels
-                else:
-                    x_start = x_offset
+                #    patch_overlap = patch[:x_delta, :, :]
+                #    target_overlap = res[x_start:(x_start + x_delta), y_offset:(y_offset + patch.shape[1]), :]
+                #    if target_overlap.shape == patch_overlap.shape:
+                #        overlap_pixels = hdr_blend(patch_overlap, target_overlap)
+                #        patch[:x_delta, :, :] = overlap_pixels
+                #else:
+                x_start = x_offset
 
                 max_x = min(x_start + patch.shape[0], width)
                 max_y = min(y_offset + patch.shape[1], height)
