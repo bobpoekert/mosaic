@@ -4,6 +4,8 @@ from PIL import Image
 import json
 import random
 import numpy as np
+from skimage.feature import hessian_matrix
+from skimage import img_as_float
 
 def frame_patches(frame, patch_size):
     for x in xrange(0, frame.shape[0]-patch_size[0]):
@@ -12,6 +14,7 @@ def frame_patches(frame, patch_size):
 
 def video_patches(video_file, n_patches=100000, patch_size=(32, 32), frame_size=(800, 600)):
     reader = ffmpeg.VideoReader(video_file, frame_size[0], frame_size[1], offset=1000)
+    prev_frame = None
     patch_count = 0
     while patch_count < n_patches:
         for patch in frame_patches(reader.get_frame(), patch_size):
@@ -22,16 +25,17 @@ def video_patches(video_file, n_patches=100000, patch_size=(32, 32), frame_size=
     reader.close()
 
 def new_index():
-    return  nmslib_vector.init(
+    return  [nmslib_vector.init(
             'l1', [], 'small_world_rand',
             nmslib_vector.DataType.VECTOR,
-            nmslib_vector.DistType.FLOAT)
+            nmslib_vector.DistType.FLOAT), None, None]
 
-def init_index(idx):
-    index_param = ['NN=10', 'initIndexAttempts=3', 'indexThreadQty=8']
+def init_index(idx, k=10):
+    index_param = ['NN=%d' % k, 'initIndexAttempts=3', 'indexThreadQty=8']
     query_time_param = ['initSearchAttempts=3']
-    nmslib_vector.createIndex(idx, index_param)
-    nmslib_vector.setQueryTimeParams(idx, query_time_param)
+    nmslib_vector.createIndex(idx[0], index_param)
+    nmslib_vector.setQueryTimeParams(idx[0], query_time_param)
+    idx[2] = k
 
 def mean_color(patch):
     size = patch.shape[0] * patch.shape[1]
@@ -66,6 +70,13 @@ def hdr_blend(patch_a, patch_b):
 
     dist_a = color_distance(patch_a, mean)
     dist_b = color_distance(patch_b, mean)
+    
+    #res = np.zeros(patch_a.shape, dtype=patch_a.dtype)
+    #mask_a = dist_a >= dist_b
+    #mask_b = np.logical_not(mask_a)
+    #res[mask_a] = patch_a[mask_a]
+    #res[mask_b] = patch_b[mask_b]
+    #return res
 
     dist_total = dist_a + dist_b
 
@@ -79,6 +90,45 @@ def hdr_blend(patch_a, patch_b):
     term_b = patch_b * mat_b
 
     return term_a + term_b
+
+def single_hessian(patch):
+    mats = []
+    patch = patch.astype(np.float64)
+    gray = (patch[:, :, 0]  + patch[:, :, 1] + patch[:, :, 2]) / 3
+    if patch.shape[0] < 2 or patch.shape[1] < 2:
+        return gray
+    gray = gray / 128. - 1
+    for el in np.gradient(gray):
+        mats.append(el)
+    return reduce(lambda a, b: a + b, mats) / len(mats)
+
+def hessian_blend(patch_a, patch_b):
+    assert patch_a.shape == patch_b.shape, repr((patch_a.shape, patch_b.shape))
+    #hessian_a = 1. / single_hessian(patch_a)
+    #hessian_b = 1. / single_hessian(patch_b)
+    #total_hessian = (hessian_a + hessian_b)
+    #weights_a = hessian_a / total_hessian
+    #weights_b = hessian_b / total_hessian
+
+    hessian_a = single_hessian(patch_a)
+    hessian_b = single_hessian(patch_b)
+    hessian_diff = (hessian_a - hessian_b)**2
+    hessian_diff_norm = hessian_diff / np.sum(hessian_diff)
+
+    #res = np.zeros(patch_a.shape, dtype=patch_a.dtype)
+    #mask_a = hessian_diff_norm <= 0.5
+    #mask_b = np.logical_not(mask_a)
+    #res[mask_a] = patch_a[mask_a]
+    #res[mask_b] = patch_b[mask_b]
+    #return res
+
+    weights_a = 1 / hessian_diff
+    weights_b = hessian_diff
+
+    r = patch_a[:, :, 0] * weights_a + patch_b[:, :, 0] * weights_b
+    g = patch_a[:, :, 1] * weights_a + patch_b[:, :, 1] * weights_b
+    b = patch_a[:, :, 2] * weights_a + patch_b[:, :, 2] * weights_b
+    return np.transpose((r, g, b))
 
 def patch_offset(patch, target):
     patch_target_row = patch[0, :, :]
@@ -96,6 +146,14 @@ def patch_offset(patch, target):
     except:
         return 0
 
+def apply_mask(mask, image):
+    nz = np.nonzero(mask)
+    max_x = np.amax(nz[0])
+    min_x = np.amin(nz[0])
+    max_y = np.amax(nz[1])
+    min_y = np.amin(nz[1])
+    return image[min_x:max_x, min_y:max_y, :]
+
 class PatchIndex(object):
 
     def __init__(self, side_margin=16, patch_size=(32, 32)):
@@ -104,6 +162,7 @@ class PatchIndex(object):
         self.patches = []
         self.index_x = new_index()
         self.index_y = new_index()
+        self.index_prev = new_index()
 
     @classmethod
     def copy_from(cls, other):
@@ -115,9 +174,23 @@ class PatchIndex(object):
         res.index_y = other.index_y
         return res
 
+    def add_vector(self, index, _id, vector):
+        if index[1] is None:
+            index[1] = vector.shape
+        assert index[1] == vector.shape
+        nmslib_vector.addDataPoint(index[0], _id, list(vector))
+
+    def knn_query(self, index, vector):
+        assert index[1] == vector.shape, repr((index[1], vector.shape))
+        return nmslib_vector.knnQuery(index[0], index[2], list(vector))
+
     def init_indexes(self):
+        print 'init x'
         init_index(self.index_x)
+        print 'init y'
         init_index(self.index_y)
+        print 'init prev'
+        init_index(self.index_prev)
 
     def vectorize_x(self, patch):
         margin = patch[0:self.side_margin, :, :]
@@ -127,75 +200,131 @@ class PatchIndex(object):
         margin = patch[:, 0:self.side_margin, :]
         return margin.astype(np.float32).flatten()
 
+    def vectorize(self, patch):
+        return patch.astype(np.float32).flatten()
+
     def match_x(self, patch):
         max_x = patch.shape[0]
         margin = patch[(max_x - self.side_margin):max_x, :, :]
-        vector = list(margin.astype(np.float32).flatten())
-        ids = nmslib_vector.knnQuery(self.index_x, 10, vector)
+        vector = margin.astype(np.float32).flatten()
+        ids = self.knn_query(self.index_x, vector)
         return self.patches[random.choice(ids)]
 
-    def match_y(self, patch):
+    def match_y(self, patch, patch_x):
         max_y = patch.shape[1]
         margin = patch[:, (max_y - self.side_margin):max_y, :]
-        vector = list(margin.astype(np.float32).flatten())
-        ids = nmslib_vector.knnQuery(self.index_y, 10, vector)
+        vector = margin.astype(np.float32).flatten()
+        ids = self.knn_query(self.index_y, vector)
+        patches = [self.patches[v] for v in ids]
+        return random.choice(patches)
+        min_score = None
+        res = None
+        for patch in patches:
+            score = np.sum((patch - patch_x)**2)
+            if min_score is None or score < min_score:
+                min_score = score
+                res = patch
+        return res
+
+    def match_prev(self, patch):
+        vector = self.vectorize(patch)
+        ids = self.knn_query(self.index_prev, vector)
         return self.patches[random.choice(ids)]
 
-    def generate_image(self, width, height):
+    def generate_image(self, width, height, prev=None, stepsize=16):
         res = np.empty((width, height, 3), dtype=np.float32)
-        patch = random.choice(self.patches)
+        mask = np.zeros((width, height), dtype=np.bool_)
+        if prev is None:
+            patch = random.choice(self.patches)
+        else:
+            patch = prev[0:self.patch_size[0], 0:self.patch_size[1], :]
         res[0:patch.shape[0], 0:patch.shape[1], :] = patch
-        x_offset = patch.shape[0]
+        x_offset = stepsize
         y_offset = 0
 
         while 1:
             try:
-                if x_offset > width - patch.shape[0]:
+                if x_offset > width - self.patch_size[0]:
                     x_offset = 0
-                    y_offset += patch.shape[1]
+                    y_offset += stepsize
 
-                if y_offset >= height:
+                if y_offset >= height - self.patch_size[1]:
                     break
                 patch_x = self.match_x(patch).astype(np.float32)
 
-                if y_offset > 0:
-                    prev_y = res[x_offset:(x_offset+patch.shape[0]), (y_offset-patch.shape[1]):y_offset, :]
-                    patch_y = self.match_y(prev_y).astype(np.float32)
+                if y_offset > patch.shape[0]:
+                    prev_y = res[
+                            x_offset:(x_offset+patch.shape[0]),
+                            (y_offset-stepsize):(y_offset + patch.shape[1] - stepsize), :]
+                    try:
+                        patch_y = self.match_y(prev_y, patch_x).astype(np.float32)
+                    except AssertionError:
+                        print x_offset, y_offset
                     patch = hdr_blend(patch_x, patch_y)
 
                 else:
                     patch = patch_x
 
-                patch = patch.astype(np.float32)
+                if prev is not None:
+                    prev_inp = prev[
+                            x_offset:(x_offset + patch.shape[0]), y_offset:(y_offset + patch.shape[1]), :]
+                    prev_patch = self.match_prev(prev_inp)
+                    patch = hdr_blend(patch, prev_patch)
 
-                #if x_offset > 0:
-                #    target = res[x_offset:(x_offset + patch.shape[0]), y_offset:(y_offset + patch.shape[1]), :]
-                #    x_delta = min(16, patch_offset(patch, target))
+                max_x = x_offset + self.patch_size[0]
+                max_y = y_offset + self.patch_size[1]
 
-                #     x_start = x_offset - x_delta
+                #patch_clip = patch[:(max_x - x_offset), :(max_y - y_offset), :]
+                patch_clip = patch
 
-                #    patch_overlap = patch[:x_delta, :, :]
-                #    target_overlap = res[x_start:(x_start + x_delta), y_offset:(y_offset + patch.shape[1]), :]
-                #    if target_overlap.shape == patch_overlap.shape:
-                #        overlap_pixels = hdr_blend(patch_overlap, target_overlap)
-                #        patch[:x_delta, :, :] = overlap_pixels
-                #else:
-                x_start = x_offset
+                patch_mask = mask[x_offset:max_x, x_offset:max_y]
 
-                max_x = min(x_start + patch.shape[0], width)
-                max_y = min(y_offset + patch.shape[1], height)
+                if patch_mask.shape[0] > 0 and patch_mask.shape[1] > 0 and np.count_nonzero(patch_mask) > 0:
+                    #print mask_t
+                    bg_overlap = apply_mask(patch_mask, res[x_offset:max_x, y_offset:max_y, :])
+                    patch_overlap = apply_mask(patch_mask, patch_clip)
+                    #print patch_overlap.shape, bg_overlap.shape, patch_clip.shape, patch_mask.shape, np.count_nonzero(patch_mask)
+                    patch_clip = hessian_blend(patch_overlap, bg_overlap)
 
-                res[x_start:max_x, y_offset:max_y, :] = patch[:(max_x - x_start), :(max_y - y_offset), :]
-                x_offset = x_start + patch.shape[0]
+                if patch_clip.shape != patch.shape:
+                    patch_clip = patch
+
+                res[x_offset:max_x, y_offset:max_y, :] = patch_clip
+                mask[x_offset:max_x, y_offset:max_y] = 1
+                x_offset += stepsize
             except KeyboardInterrupt:
                 break
         return res.astype(np.uint8)
 
-    def load_video(self, fname, **kwargs):
-        for idx, patch in enumerate(video_patches(fname, **kwargs)):
-            self.patches.append(patch)
-            nmslib_vector.addDataPoint(self.index_x, idx, list(self.vectorize_x(patch)))
-            nmslib_vector.addDataPoint(self.index_y, idx, list(self.vectorize_y(patch)))
+    def generate_video(self, width, height, frame_count):
+        prev = None
+        for i in xrange(frame_count):
+            res = self.generate_image(width, height, prev)
+            prev = res
+            yield res
+
+    def load_video(self, fname, frame_size=(640, 480), offset=0, frame_count=30 * 5):
+        reader = ffmpeg.VideoReader(fname, frame_size[0], frame_size[1], offset)
+        prev_frame = None
+        prev_shape = None
+        for frame_idx in xrange(frame_count):
+            frame = reader.get_frame()
+            for x in xrange(0, frame.shape[0]-1, self.patch_size[0]):
+                for y in xrange(0, frame.shape[1]-1, self.patch_size[1]):
+                    patch = frame[x:(x + self.patch_size[0]), y:(y + self.patch_size[1]), :]
+                    if prev_shape is not None and patch.shape != prev_shape:
+                        continue
+                    if prev_shape is None:
+                        prev_shape = patch.shape
+                    idx = len(self.patches)
+                    self.patches.append(patch)
+                    self.add_vector(self.index_x, idx, self.vectorize_x(patch))
+                    self.add_vector(self.index_y, idx, self.vectorize_y(patch))
+                    if prev_frame is not None:
+                        prev_patch = prev_frame[x:(x + self.patch_size[0]), y:(y + self.patch_size[1]), :]
+                        self.add_vector(self.index_prev, idx, self.vectorize(prev_patch))
+            prev_frame = frame
+        reader.close()
 
     def save(self, fname):
         nms_x_fname = '%s_x.nms' % fname

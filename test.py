@@ -4,5 +4,6 @@ from PIL import Image
 index = patches.PatchIndex()
 index.load_video('infomercial.mkv')
 index.init_indexes()
-outp = index.generate_image(600, 800)
-Image.fromarray(outp).save('test.png')
+for i, frame in enumerate(index.generate_video(480, 640, 240)):
+    print i
+    Image.fromarray(frame).save('frames/%d.png' % i)
