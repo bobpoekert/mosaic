@@ -304,7 +304,7 @@ class PatchIndex(object):
             yield res
 
     def load_video(self, fname, frame_size=(640, 480), offset=0, frame_count=30 * 5):
-        reader = ffmpeg.VideoReader(fname, frame_size[0], frame_size[1], offset)
+        reader = ffmpeg.VideoReader(fname, frame_size[0], frame_size[1], offset=offset)
         prev_frame = None
         prev_shape = None
         for frame_idx in xrange(frame_count):

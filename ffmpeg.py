@@ -4,7 +4,6 @@ import numpy as np
 class VideoReader(object):
 
     def __init__(self, fname, width, height, offset=0):
-        offset = 10 * 60
         self.fname = fname
         self.width = width
         self.height = height
