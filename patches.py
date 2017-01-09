@@ -154,12 +154,61 @@ def apply_mask(mask, image):
     min_y = np.amin(nz[1])
     return image[min_x:max_x, min_y:max_y, :]
 
+class PatchList(object):
+
+    def __init__(self):
+        self.frozen = False
+        self.patch_list = []
+        self.patch_array = None
+        self.height = None
+        self.width = None
+
+    def add(self, patch):
+        assert not self.frozen
+        height = patch.shape[1]
+        width = patch.shape[0]
+        if self.height is None:
+            self.height = height
+        assert self.height == height
+        if self.width is None:
+            self.width = width
+        assert self.width == width
+        res = len(self.patch_list)
+        self.patch_list.append(patch)
+        return res
+
+    def freeze(self):
+        self.patch_array = np.empty((self.width * len(self.patch_list), self.height, 3), dtype=np.uint8)
+        offset = 0
+        idx = 0
+        while offset < self.patch_array.shape[0]:
+            patch = self.patch_list[idx]
+            self.patch_array[offset:(offset + patch.shape[0]), :, :] = patch
+            offset += patch.shape[0]
+            self.patch_list[idx] = None
+            idx += 1
+        self.patch_list = None
+        self.frozen = True
+
+    def __getitem__(self, idx):
+        if self.frozen:
+            offset = self.width * idx
+            return self.patch_array[offset:(offset + self.width), :, :]
+        else:
+            return self.patch_list[idx]
+
+    def __len__(self):
+        if self.frozen:
+            return self.patch_array.shape[0] / self.width
+        else:
+            return len(self.patch_list)
+
 class PatchIndex(object):
 
     def __init__(self, side_margin=16, patch_size=(32, 32)):
         self.side_margin = side_margin
         self.patch_size = patch_size
-        self.patches = []
+        self.patches = PatchList()
         self.index_x = new_index()
         self.index_y = new_index()
         self.index_prev = new_index()
@@ -316,8 +365,7 @@ class PatchIndex(object):
                         continue
                     if prev_shape is None:
                         prev_shape = patch.shape
-                    idx = len(self.patches)
-                    self.patches.append(patch)
+                    idx = self.patches.add(patch)
                     self.add_vector(self.index_x, idx, self.vectorize_x(patch))
                     self.add_vector(self.index_y, idx, self.vectorize_y(patch))
                     if prev_frame is not None:
@@ -325,39 +373,5 @@ class PatchIndex(object):
                         self.add_vector(self.index_prev, idx, self.vectorize(prev_patch))
             prev_frame = frame
         reader.close()
-
-    def save(self, fname):
-        nms_x_fname = '%s_x.nms' % fname
-        nms_p_fname = '%s_x.nms' % fname
-        image_fname = '%s.png' % fname
-
-        nmslib_vector.saveIndex(self.index_x, nms_x_fname)
-        nmslib_vector.saveIndex(self.index_y, nms_y_fname)
-        patch_image = np.empty((patch_size[0] * len(self.patches), patch_size[1], 3), dtype=np.uint8)
-        offset = 0
-        for patch in self.patches:
-            patch_image[offset:(offset + patch.shape[0]), :, :] = patch
-            offset += patch.shape[0]
-        outp_image = Image.fromarray(patch_image)
-        outp_image.save(image_fname)
-        config = dict(
-                nms_x_fname=nms_x_fname,
-                nms_y_fname=nms_y_fname,
-                image_fname=image_fname,
-                patch_size=self.patch_size,
-                side_margin=self.side_margin)
-        with open(fname, 'w') as outf:
-            json.dump(config, outf)
-
-    @classmethod
-    def load(cls, fname):
-        with open(fname, 'r') as inf:
-            config = json.load(inf)
-        res = cls(side_margin=config['side_margin'], patch_size=config['patch_size'])
-        nmslib_vector.loadIndex(res.index, config['nms_fname'])
-        image_data = np.asarray(Image.open(config['image_fname']).convert('RGB'))
-        patch_size = config['patch_size']
-        res.patches = [image_data[x:(x+patch_size[0]), :, :] for x in \
-                xrange(0, image_data.shape[0]-patch_size[0], patch_size[0])]
-        return res
+        self.patches.freeze()
 
