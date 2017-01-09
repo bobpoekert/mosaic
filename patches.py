@@ -4,6 +4,7 @@ from PIL import Image
 import json
 import random
 import numpy as np
+from concurrent import futures
 from skimage.feature import hessian_matrix
 from skimage import img_as_float
 
@@ -154,6 +155,19 @@ def apply_mask(mask, image):
     min_y = np.amin(nz[1])
     return image[min_x:max_x, min_y:max_y, :]
 
+work_pool = futures.ThreadPoolExecutor(max_workers=3)
+
+class ThreadWorker(object):
+
+    def __init__(self, worker_fn):
+        self.worker_fn = worker_fn
+
+    def call(self, *args, **kwargs):
+        return work_pool.submit(self.worker_fn, *args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        return self.call(*args, **kwargs).result()
+
 class PatchList(object):
 
     def __init__(self):
@@ -212,6 +226,9 @@ class PatchIndex(object):
         self.index_x = new_index()
         self.index_y = new_index()
         self.index_prev = new_index()
+        self.x_worker = ThreadWorker(self.match_x)
+        self.y_worker = ThreadWorker(self.match_y)
+        self.prev_worker = ThreadWorker(self.match_prev)
 
     @classmethod
     def copy_from(cls, other):
@@ -259,21 +276,13 @@ class PatchIndex(object):
         ids = self.knn_query(self.index_x, vector)
         return self.patches[random.choice(ids)]
 
-    def match_y(self, patch, patch_x):
+    def match_y(self, patch):
         max_y = patch.shape[1]
         margin = patch[:, (max_y - self.side_margin):max_y, :]
         vector = margin.astype(np.float32).flatten()
         ids = self.knn_query(self.index_y, vector)
         patches = [self.patches[v] for v in ids]
         return random.choice(patches)
-        min_score = None
-        res = None
-        for patch in patches:
-            score = np.sum((patch - patch_x)**2)
-            if min_score is None or score < min_score:
-                min_score = score
-                res = patch
-        return res
 
     def match_prev(self, patch):
         vector = self.vectorize(patch)
@@ -299,25 +308,35 @@ class PatchIndex(object):
 
                 if y_offset >= height - self.patch_size[1]:
                     break
-                patch_x = self.match_x(patch).astype(np.float32)
+                patch_x = self.x_worker.call(patch)
 
                 if y_offset > patch.shape[0]:
                     prev_y = res[
                             x_offset:(x_offset+patch.shape[0]),
                             (y_offset-stepsize):(y_offset + patch.shape[1] - stepsize), :]
                     try:
-                        patch_y = self.match_y(prev_y, patch_x).astype(np.float32)
+                        patch_y = self.y_worker.call(prev_y)
                     except AssertionError:
                         print x_offset, y_offset
-                    patch = hdr_blend(patch_x, patch_y)
 
                 else:
-                    patch = patch_x
+                    patch_y = None
 
                 if prev is not None:
                     prev_inp = prev[
                             x_offset:(x_offset + patch.shape[0]), y_offset:(y_offset + patch.shape[1]), :]
-                    prev_patch = self.match_prev(prev_inp)
+                    prev_patch = self.prev_worker(prev_inp).astype(np.float32)
+                else:
+                    prev_patch = None
+
+                patch_x = patch_x.result().astype(np.float32)
+                if patch_y is not None:
+                    patch_y = patch_y.result().astype(np.float32)
+                    patch = hdr_blend(patch_x, patch_y)
+                else:
+                    patch = patch_x
+
+                if prev_patch is not None:
                     patch = hdr_blend(patch, prev_patch)
 
                 max_x = x_offset + self.patch_size[0]

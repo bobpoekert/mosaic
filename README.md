@@ -3,11 +3,13 @@ video patch synthesis
 
 dependencies
 ---
+* python2.7
 * ffmpeg
 * [nmslib](https://github.com/searchivarius/nmslib)
 * numpy
 * scikit-image
 * PIL/Pillow
+* futures
 
 usage
 ---
