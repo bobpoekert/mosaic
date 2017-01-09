@@ -7,6 +7,7 @@ dependencies
 * [nmslib](https://github.com/searchivarius/nmslib)
 * numpy
 * scikit-image
+* PIL/Pillow
 
 usage
 ---
